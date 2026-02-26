@@ -1,3 +1,9 @@
 .github/workflows/
 __pycache__/
 *.pyc
+# Internal planning files
+article-draft.md
+article-final.md
+marketplace-listing.md
+IMPLEMENTATION_SUMMARY.md
+*.notes
