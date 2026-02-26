@@ -73,25 +73,26 @@ class WorkflowValidator:
         self.issues: List[Issue] = []
         self.lines: List[str] = []
         self.filepath: str = ""
+        self.workflow_data: Optional[Dict[str, Any]] = None
 
     def load_workflow(self, path: str) -> bool:
         """Load and parse workflow YAML file.
-        
+
         Args:
             path: Path to .yml or .yaml workflow file
-            
+
         Returns:
             True if successfully loaded, False on parse error
         """
         self.filepath = path
         self.issues = []
+        self.workflow_data = None
 
         try:
             with open(path, 'r') as f:
-                self.lines = f.read().splitlines()
-                # Validate YAML structure (but keep lines for line-based checks)
-                f.seek(0)
-                yaml.safe_load(f)
+                content = f.read()
+                self.lines = content.splitlines()
+                self.workflow_data = yaml.safe_load(content)
             return True
         except (IOError, OSError) as e:
             self._add_issue(
@@ -263,9 +264,151 @@ class WorkflowValidator:
                     ),
                 )
 
+    def _get_triggers(self) -> List[str]:
+        """Extract trigger event names from parsed workflow data.
+
+        PyYAML (YAML 1.1) parses bare 'on' as boolean True, so we check
+        both 'on' (string key) and True (boolean key).
+        """
+        if not self.workflow_data:
+            return []
+        # PyYAML YAML 1.1 compat: bare 'on' is parsed as boolean True
+        on = self.workflow_data.get('on') or self.workflow_data.get(True, {})
+        if isinstance(on, str):
+            return [on]
+        if isinstance(on, list):
+            return [str(t) for t in on]
+        if isinstance(on, dict):
+            return list(on.keys())
+        return []
+
+    def check_pull_request_target(self) -> None:
+        """Detect 'pwn request' pattern: pull_request_target + checkout of PR head code.
+
+        When a workflow triggers on pull_request_target, it runs with the base
+        repository's secrets and write permissions — even for fork PRs. If the
+        workflow checks out the PR head code (attacker-controlled), the attacker
+        can execute arbitrary code with access to your secrets.
+
+        See: https://securitylab.github.com/research/github-actions-preventing-pwn-requests/
+        """
+        if 'pull_request_target' not in self._get_triggers():
+            return
+
+        trigger_line = 1
+        for line_num, line in enumerate(self.lines, 1):
+            if 'pull_request_target' in line:
+                trigger_line = line_num
+                break
+
+        # Look for checkout step that references the PR head
+        UNSAFE_PR_HEAD_REFS = [
+            'github.event.pull_request.head.sha',
+            'github.event.pull_request.head.ref',
+            'github.head_ref',
+        ]
+
+        for line_num, line in enumerate(self.lines, 1):
+            if 'ref:' not in line:
+                continue
+            for expr_match in self.EXPR_RE.finditer(line):
+                expr = expr_match.group(1).strip()
+                if any(unsafe in expr for unsafe in UNSAFE_PR_HEAD_REFS):
+                    self._add_issue(
+                        check="pull-request-target-pwn",
+                        severity="critical",
+                        line=line_num,
+                        location=f"pull_request_target (line {trigger_line}) + checkout (line {line_num})",
+                        description=(
+                            f"Workflow triggers on `pull_request_target` and checks out "
+                            f"the PR head via `{expr}`. This is the 'pwn request' vulnerability: "
+                            f"pull_request_target runs with base-branch secrets and write access, "
+                            f"but this checkout executes attacker-controlled code from the fork. "
+                            f"This pattern caused the Codecov breach and many similar incidents."
+                        ),
+                        fix=(
+                            "Option 1: Remove the checkout ref — only check out the base branch code.\n"
+                            "Option 2: Build in a separate `pull_request` workflow (no secrets) "
+                            "and use `workflow_run` to handle secret-requiring steps after review.\n"
+                            "Option 3: Gate secret usage behind a reviewer approval check:\n"
+                            "  if: contains(github.event.pull_request.labels.*.name, 'safe-to-test')"
+                        ),
+                    )
+
+    def check_workflow_run(self) -> None:
+        """Detect privilege escalation risk in workflow_run triggered workflows.
+
+        Workflows triggered by workflow_run have access to base-branch secrets
+        even when the triggering workflow came from a forked PR. If this workflow
+        downloads artifacts from the triggering run and executes code from them
+        without verifying the source branch, attackers can exfiltrate secrets.
+        """
+        if 'workflow_run' not in self._get_triggers():
+            return
+
+        trigger_line = 1
+        for line_num, line in enumerate(self.lines, 1):
+            if 'workflow_run' in line:
+                trigger_line = line_num
+                break
+
+        # Check if the workflow downloads artifacts from the triggering run
+        artifact_download_line = None
+        for line_num, line in enumerate(self.lines, 1):
+            if ('download-artifact' in line or 'gh run download' in line):
+                artifact_download_line = line_num
+                break
+
+        # Check if there's a branch guard condition
+        has_branch_guard = any(
+            'workflow_run.head_branch' in line or
+            'workflow_run.head_repository' in line
+            for line in self.lines
+        )
+
+        if artifact_download_line and not has_branch_guard:
+            self._add_issue(
+                check="workflow-run-artifact-injection",
+                severity="critical",
+                line=artifact_download_line,
+                location=f"workflow_run (line {trigger_line}) + artifact download (line {artifact_download_line})",
+                description=(
+                    "Workflow triggers on `workflow_run` and downloads artifacts without "
+                    "verifying the source branch. Artifacts from a fork PR can contain "
+                    "attacker-controlled code that will execute with your base-branch secrets. "
+                    "This is a common vector for secret exfiltration in CI pipelines."
+                ),
+                fix=(
+                    "Add a branch guard before processing artifacts:\n"
+                    "  if: >\n"
+                    "    github.event.workflow_run.conclusion == 'success' &&\n"
+                    "    github.event.workflow_run.head_branch == github.event.repository.default_branch\n"
+                    "Or check the head repository matches yours:\n"
+                    "  if: github.event.workflow_run.head_repository.full_name == github.repository"
+                ),
+            )
+        elif not artifact_download_line:
+            # Workflow_run without artifact download — lower severity advisory
+            self._add_issue(
+                check="workflow-run-secrets-access",
+                severity="medium",
+                line=trigger_line,
+                location="workflow_run trigger",
+                description=(
+                    "Workflow triggers on `workflow_run`, which has access to base-branch secrets "
+                    "even when triggered by a fork PR. Ensure this workflow does not execute "
+                    "untrusted code or expose secrets to untrusted sources. "
+                    "Review all artifact downloads and code executions in this workflow."
+                ),
+                fix=(
+                    "If this workflow processes artifacts, add a branch/repo guard:\n"
+                    "  if: github.event.workflow_run.head_branch == 'main'"
+                ),
+            )
+
     def validate(self) -> List[Issue]:
         """Run all checks and return list of issues found.
-        
+
         Returns:
             List of Issue objects representing security problems
         """
@@ -275,6 +418,8 @@ class WorkflowValidator:
         self.check_unpinned_actions()
         self.check_dangerous_permissions()
         self.check_script_injection()
+        self.check_pull_request_target()
+        self.check_workflow_run()
 
         return self.issues
 

@@ -1,0 +1,26 @@
+name: Dangerous - Pwn Request Pattern
+# This workflow demonstrates the "pwn request" vulnerability:
+# pull_request_target runs with base branch secrets but checks out
+# attacker-controlled code from the forked PR.
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  comment-on-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR code (DANGEROUS - attacker controlled!)
+        uses: actions/checkout@6c8c9b89f1654e1eb3fcf0b25f9f0ec60a72cc2c  # v4.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Build and test
+        run: npm ci && npm test
+
+      - name: Post comment
+        run: echo "Tests passed"

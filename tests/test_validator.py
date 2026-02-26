@@ -40,6 +40,18 @@ def partial_workflow():
 
 
 @pytest.fixture
+def pwn_request_workflow():
+    """Load pwn_request.yml fixture demonstrating pull_request_target + unsafe checkout."""
+    return Path(__file__).parent.parent / 'fixtures' / 'pwn_request.yml'
+
+
+@pytest.fixture
+def workflow_run_unsafe():
+    """Load workflow_run_unsafe.yml fixture demonstrating workflow_run artifact injection."""
+    return Path(__file__).parent.parent / 'fixtures' / 'workflow_run_unsafe.yml'
+
+
+@pytest.fixture
 def validator():
     """Create a fresh WorkflowValidator instance."""
     return WorkflowValidator()
@@ -925,6 +937,329 @@ jobs:
         validator2.load_workflow(str(partial_workflow))
         issues2 = validator2.validate()
         assert len(issues2) >= 1
+
+
+# ============================================================================
+# PULL_REQUEST_TARGET TESTS: Pwn request vulnerability
+# ============================================================================
+
+class TestPullRequestTarget:
+    """Test detection of pull_request_target + unsafe checkout ('pwn request')."""
+
+    def test_pwn_request_detects_head_sha_checkout(self, validator):
+        """Test detection of pull_request_target with PR head SHA checkout."""
+        workflow = """
+name: Test
+on:
+  pull_request_target:
+    types: [opened]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@6c8c9b89f1654e1eb3fcf0b25f9f0ec60a72cc2c
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False) as f:
+            f.write(workflow)
+            f.flush()
+
+            validator.load_workflow(f.name)
+            validator.check_pull_request_target()
+
+            issues = [i for i in validator.issues if i.check == "pull-request-target-pwn"]
+            assert len(issues) >= 1
+            assert issues[0].severity == "critical"
+            assert "pwn request" in issues[0].description
+
+            Path(f.name).unlink()
+
+    def test_pwn_request_detects_head_ref_checkout(self, validator):
+        """Test detection of pull_request_target with PR head ref checkout."""
+        workflow = """
+name: Test
+on: pull_request_target
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@6c8c9b89f1654e1eb3fcf0b25f9f0ec60a72cc2c
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False) as f:
+            f.write(workflow)
+            f.flush()
+
+            validator.load_workflow(f.name)
+            validator.check_pull_request_target()
+
+            issues = [i for i in validator.issues if i.check == "pull-request-target-pwn"]
+            assert len(issues) >= 1
+            assert issues[0].severity == "critical"
+
+            Path(f.name).unlink()
+
+    def test_pwn_request_detects_github_head_ref(self, validator):
+        """Test detection of pull_request_target with github.head_ref checkout."""
+        workflow = """
+name: Test
+on: pull_request_target
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@6c8c9b89f1654e1eb3fcf0b25f9f0ec60a72cc2c
+        with:
+          ref: ${{ github.head_ref }}
+"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False) as f:
+            f.write(workflow)
+            f.flush()
+
+            validator.load_workflow(f.name)
+            validator.check_pull_request_target()
+
+            issues = [i for i in validator.issues if i.check == "pull-request-target-pwn"]
+            assert len(issues) >= 1
+
+            Path(f.name).unlink()
+
+    def test_pwn_request_safe_no_unsafe_checkout(self, validator):
+        """Test that pull_request_target without PR head checkout is safe."""
+        workflow = """
+name: Test
+on: pull_request_target
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@6c8c9b89f1654e1eb3fcf0b25f9f0ec60a72cc2c
+      - run: echo "Commenting on PR"
+"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False) as f:
+            f.write(workflow)
+            f.flush()
+
+            validator.load_workflow(f.name)
+            validator.check_pull_request_target()
+
+            issues = [i for i in validator.issues if i.check == "pull-request-target-pwn"]
+            assert len(issues) == 0
+
+            Path(f.name).unlink()
+
+    def test_pwn_request_safe_pull_request_trigger(self, validator):
+        """Test that pull_request trigger (not target) with head checkout is safe."""
+        workflow = """
+name: Test
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@6c8c9b89f1654e1eb3fcf0b25f9f0ec60a72cc2c
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False) as f:
+            f.write(workflow)
+            f.flush()
+
+            validator.load_workflow(f.name)
+            validator.check_pull_request_target()
+
+            issues = [i for i in validator.issues if i.check == "pull-request-target-pwn"]
+            assert len(issues) == 0
+
+            Path(f.name).unlink()
+
+    def test_pwn_request_fixture(self, pwn_request_workflow, validator):
+        """Test that pwn_request.yml fixture is flagged correctly."""
+        validator.load_workflow(str(pwn_request_workflow))
+        issues = validator.validate()
+
+        pwn_issues = [i for i in issues if i.check == "pull-request-target-pwn"]
+        assert len(pwn_issues) >= 1
+        assert pwn_issues[0].severity == "critical"
+
+
+# ============================================================================
+# WORKFLOW_RUN TESTS: Artifact injection vulnerability
+# ============================================================================
+
+class TestWorkflowRun:
+    """Test detection of workflow_run privilege escalation vulnerabilities."""
+
+    def test_workflow_run_artifact_injection_flagged(self, validator):
+        """Test that workflow_run + artifact download without guard is flagged critical."""
+        workflow = """
+name: Test
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@6c8c9b89f1654e1eb3fcf0b25f9f0ec60a72cc2c
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+      - run: ./deploy.sh
+"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False) as f:
+            f.write(workflow)
+            f.flush()
+
+            validator.load_workflow(f.name)
+            validator.check_workflow_run()
+
+            issues = [i for i in validator.issues if i.check == "workflow-run-artifact-injection"]
+            assert len(issues) >= 1
+            assert issues[0].severity == "critical"
+            assert "branch guard" in issues[0].fix
+
+            Path(f.name).unlink()
+
+    def test_workflow_run_artifact_with_branch_guard_safe(self, validator):
+        """Test that workflow_run + artifact download WITH branch guard passes."""
+        workflow = """
+name: Test
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.head_branch == 'main'
+    steps:
+      - uses: actions/download-artifact@6c8c9b89f1654e1eb3fcf0b25f9f0ec60a72cc2c
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False) as f:
+            f.write(workflow)
+            f.flush()
+
+            validator.load_workflow(f.name)
+            validator.check_workflow_run()
+
+            critical_issues = [i for i in validator.issues if i.check == "workflow-run-artifact-injection"]
+            assert len(critical_issues) == 0
+
+            Path(f.name).unlink()
+
+    def test_workflow_run_without_artifacts_medium_severity(self, validator):
+        """Test that workflow_run without artifact download is medium severity advisory."""
+        workflow = """
+name: Test
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Workflow completed"
+"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False) as f:
+            f.write(workflow)
+            f.flush()
+
+            validator.load_workflow(f.name)
+            validator.check_workflow_run()
+
+            advisory_issues = [i for i in validator.issues if i.check == "workflow-run-secrets-access"]
+            assert len(advisory_issues) >= 1
+            assert advisory_issues[0].severity == "medium"
+
+            Path(f.name).unlink()
+
+    def test_workflow_run_repo_guard_safe(self, validator):
+        """Test that workflow_run with head_repository guard passes critical check."""
+        workflow = """
+name: Test
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.head_repository.full_name == github.repository
+    steps:
+      - uses: actions/download-artifact@6c8c9b89f1654e1eb3fcf0b25f9f0ec60a72cc2c
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False) as f:
+            f.write(workflow)
+            f.flush()
+
+            validator.load_workflow(f.name)
+            validator.check_workflow_run()
+
+            critical_issues = [i for i in validator.issues if i.check == "workflow-run-artifact-injection"]
+            assert len(critical_issues) == 0
+
+            Path(f.name).unlink()
+
+    def test_workflow_run_unsafe_fixture(self, workflow_run_unsafe, validator):
+        """Test that workflow_run_unsafe.yml fixture is flagged correctly."""
+        validator.load_workflow(str(workflow_run_unsafe))
+        issues = validator.validate()
+
+        injection_issues = [i for i in issues if i.check == "workflow-run-artifact-injection"]
+        assert len(injection_issues) >= 1
+        assert injection_issues[0].severity == "critical"
+
+    def test_non_workflow_run_not_flagged(self, validator):
+        """Test that regular push/pull_request triggers are not flagged."""
+        workflow = """
+name: Test
+on: push
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "test"
+"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False) as f:
+            f.write(workflow)
+            f.flush()
+
+            validator.load_workflow(f.name)
+            validator.check_workflow_run()
+
+            issues = [i for i in validator.issues if 'workflow-run' in i.check]
+            assert len(issues) == 0
+
+            Path(f.name).unlink()
 
 
 # ============================================================================

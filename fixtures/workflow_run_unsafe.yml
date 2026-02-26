@@ -1,0 +1,26 @@
+name: Dangerous - Workflow Run Artifact Injection
+# This workflow demonstrates the workflow_run privilege escalation:
+# It has access to base-branch secrets but downloads artifacts
+# from a triggering run without verifying the source branch.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts (DANGEROUS - no branch guard!)
+        uses: actions/download-artifact@6c8c9b89f1654e1eb3fcf0b25f9f0ec60a72cc2c
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Deploy
+        run: ./deploy.sh
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
