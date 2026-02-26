@@ -1,0 +1,49 @@
+name: 'Workflow Security Hardener'
+description: 'Scan GitHub Actions workflows for security issues: unpinned actions, broad permissions, script injection, insecure checkout'
+author: 'indoor47'
+
+branding:
+  icon: 'shield'
+  color: 'red'
+
+inputs:
+  fail_on:
+    description: 'Fail if findings at this severity or above. Options: critical, high, medium, low, none'
+    required: false
+    default: 'critical'
+  format:
+    description: 'Output format: text, json, markdown, sarif'
+    required: false
+    default: 'text'
+  fix:
+    description: 'Auto-fix unpinned actions by pinning to commit SHAs'
+    required: false
+    default: 'false'
+  github_token:
+    description: 'GitHub token for SHA resolution (needed for --fix). Defaults to github.token'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  score:
+    description: 'Security score (0-100)'
+  findings-count:
+    description: 'Number of security issues found'
+  findings:
+    description: 'Full findings in JSON format'
+  sarif-file:
+    description: 'Path to SARIF file (when format=sarif)'
+  fixed-count:
+    description: 'Number of issues auto-fixed (when fix=true)'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run Workflow Security Scan
+      shell: bash
+      run: python3 ${{ github.action_path }}/hardener.py
+      env:
+        INPUT_FAIL_ON: ${{ inputs.fail_on }}
+        INPUT_FORMAT: ${{ inputs.format }}
+        INPUT_FIX: ${{ inputs.fix }}
+        INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
