@@ -47,14 +47,11 @@ brew tap indoor47/homebrew-gh-workflow-hardener
 brew install gh-workflow-hardener
 ```
 
-**Option 2: pip**
+**Option 2: From source**
 ```bash
-pip install gh-workflow-hardener
-```
-
-**Option 3: Docker**
-```bash
-docker run -v /path/to/repo:/repo indoor47/gh-workflow-hardener
+git clone https://github.com/indoor47/gh-workflow-hardener
+cd gh-workflow-hardener
+pip install .
 ```
 
 ### As a GitHub Action (recommended)
@@ -81,7 +78,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@a81bbbf8298c0fa03ea29cdc473d45aca646fdde3
-      - uses: indoor47/gh-workflow-hardener@v1.0.0
+      - uses: indoor47/gh-workflow-hardener@v1.1.0
         with:
           fail_on: critical
 ```
