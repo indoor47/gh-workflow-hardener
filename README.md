@@ -145,6 +145,10 @@ By pinning actions to specific commit SHAs and validating permissions, you elimi
 
 The CLI requires only `pyyaml` and `click`. No heavy scanning frameworks, no bloat. Fast. Auditable.
 
+## VS Code Extension
+
+Prefer catching issues as you type? The companion [**GitHub Workflow Hardener**](https://github.com/indoor47/vscode-workflow-hardener) VS Code extension runs the same checks inline while you edit `.github/workflows/` files — no CLI needed.
+
 ## Contributing
 
 Found a false positive? Have a better detection rule? Open an issue or PR.
