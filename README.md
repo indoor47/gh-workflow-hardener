@@ -41,9 +41,15 @@ After the [tj-actions supply chain attack](https://www.crowd.dev/blog/github-act
 
 ### As a CLI tool
 
+**Option 1: Homebrew (macOS & Linux)**
+```bash
+brew tap indoor47/homebrew-gh-workflow-hardener
+brew install gh-workflow-hardener
+```
+
+**Option 2: pip**
 ```bash
 pip install gh-workflow-hardener
-gh-workflow-hardener
 ```
 
 ### As a GitHub Action (recommended)
