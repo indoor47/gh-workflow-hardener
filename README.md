@@ -52,6 +52,11 @@ brew install gh-workflow-hardener
 pip install gh-workflow-hardener
 ```
 
+**Option 3: Docker**
+```bash
+docker run -v /path/to/repo:/repo indoor47/gh-workflow-hardener
+```
+
 ### As a GitHub Action (recommended)
 
 Add to `.github/workflows/security-check.yml`:
