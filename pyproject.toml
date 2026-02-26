@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gh-workflow-hardener"
-version = "0.1.0"
+version = "1.1.0"
 description = "GitHub Actions security scanner — pins actions to SHA hashes, detects permission issues, flags script injection"
 readme = "README.md"
 requires-python = ">=3.8"
