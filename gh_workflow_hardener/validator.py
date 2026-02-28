@@ -20,6 +20,7 @@ class Issue:
     description: str
     location: Optional[str] = None  # action name, permission, etc
     fix: Optional[str] = None
+    file: Optional[str] = None  # source workflow file path
 
 
 class WorkflowValidator:
@@ -111,6 +112,33 @@ class WorkflowValidator:
             )
             return False
 
+    def load_yaml_string(self, content: str, filename: str = "<input>") -> bool:
+        """Load and parse workflow YAML from a string.
+
+        Args:
+            content: Raw YAML content
+            filename: Optional filename for issue reporting
+
+        Returns:
+            True if successfully parsed, False on error
+        """
+        self.filepath = filename
+        self.issues = []
+        self.workflow_data = None
+
+        try:
+            self.lines = content.splitlines()
+            self.workflow_data = yaml.safe_load(content)
+            return True
+        except yaml.YAMLError as e:
+            self._add_issue(
+                check="yaml-parse-error",
+                severity="critical",
+                line=1,
+                description=f"Invalid YAML: {e}",
+            )
+            return False
+
     def check_unpinned_actions(self) -> None:
         """Detect actions NOT pinned to a commit SHA (supply chain risk)."""
         for line_num, line in enumerate(self.lines, 1):
@@ -147,10 +175,25 @@ class WorkflowValidator:
     def check_dangerous_permissions(self) -> None:
         """Flag workflows with overly broad write permissions."""
         has_top_level_perms = False
+        has_restrictive_top_level = False  # True only when top-level block has reads but no writes
+        top_level_seen_read = False   # saw at least one read-only perm at top level
+        top_level_seen_write = False  # saw at least one write perm at top level
+        in_top_level_perms_block = False   # True only while inside the top-level permissions: block
 
         for line_num, line in enumerate(self.lines, 1):
             stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
             indent = len(line) - len(line.lstrip())
+
+            # Any new top-level key transitions us out of the permissions block
+            if indent == 0 and stripped.endswith(":"):
+                entering_perms = stripped.startswith("permissions:")
+                if entering_perms and not in_top_level_perms_block:
+                    # Reset per-block tracking when entering a new permissions block
+                    top_level_seen_read = False
+                    top_level_seen_write = False
+                in_top_level_perms_block = entering_perms
 
             # Detect top-level permissions block
             if indent == 0 and stripped.startswith("permissions:"):
@@ -176,19 +219,47 @@ class WorkflowValidator:
                         ),
                     )
 
+            # Track whether the top-level permissions default is restrictive (read-only).
+            # Strip inline comments before checking so `contents: read  # write token`
+            # is not incorrectly treated as a write permission.
+            if in_top_level_perms_block and indent > 0:
+                key_part = stripped.split("#")[0].strip()
+                if "write" in key_part:
+                    top_level_seen_write = True
+                else:
+                    top_level_seen_read = True
+                # Restrictive only when we have reads but no writes in the top-level block
+                has_restrictive_top_level = top_level_seen_read and not top_level_seen_write
+
             # Check for dangerous individual permissions
             if "contents: write" in stripped or "packages: write" in stripped:
-                self._add_issue(
-                    check="broad-permissions",
-                    severity="high",
-                    line=line_num,
-                    location="permissions",
-                    description=(
-                        f"Permission `{stripped.strip()}` grants write access. "
-                        f"This could allow a compromised step to modify your repository. "
-                        f"Only grant write permissions when necessary."
-                    ),
-                )
+                is_job_level = not in_top_level_perms_block
+                if is_job_level and has_restrictive_top_level:
+                    # Job-level write with a read-only top-level default is the
+                    # least-privilege pattern — flag as advisory only.
+                    self._add_issue(
+                        check="broad-permissions",
+                        severity="medium",
+                        line=line_num,
+                        location="permissions",
+                        description=(
+                            f"Permission `{stripped}` grants write access at the job level. "
+                            f"The workflow-level default is read-only, which is correct. "
+                            f"Verify this job genuinely requires write access."
+                        ),
+                    )
+                else:
+                    self._add_issue(
+                        check="broad-permissions",
+                        severity="high",
+                        line=line_num,
+                        location="permissions",
+                        description=(
+                            f"Permission `{stripped}` grants write access. "
+                            f"This could allow a compromised step to modify your repository. "
+                            f"Only grant write permissions when necessary."
+                        ),
+                    )
 
         # No permissions block at all
         if not has_top_level_perms:
@@ -440,6 +511,7 @@ class WorkflowValidator:
             location=location,
             description=description,
             fix=fix,
+            file=self.filepath or None,
         ))
 
     def to_dict_list(self) -> List[Dict[str, Any]]:
